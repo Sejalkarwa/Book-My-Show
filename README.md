@@ -1,3 +1,3 @@
 # DevOps Capstone Project
-Added setup details by Sejal
+Added setup details by Sejal Karwa
 
