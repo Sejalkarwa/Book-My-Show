@@ -1,0 +1,117 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk17'
+        nodejs 'node23'
+    }
+
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout from Git') {
+            steps {
+                git branch: '', url: 'https://github.com/akshu20791/Book-My-Show.git'
+                sh 'ls -la'  // Verify files after checkout
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('bookmyshow-app') {
+                    sh '''
+                        ls -la  # Verify package.json exists
+                        if [ -f package.json ]; then
+                            rm -rf node_modules package-lock.json
+                            npm install
+                        else
+                            echo "Error: package.json not found!"
+                            exit 1
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    dir('bookmyshow-app') {
+                        sh '''
+                            $SCANNER_HOME/bin/sonar-scanner \
+                              -Dsonar.projectKey=BMS \
+                              -Dsonar.projectName=BMS \
+                              -Dsonar.sources=. \
+                              -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'docker-creds', toolName: 'docker') {
+                        sh '''
+                            echo "Building Docker image..."
+                            docker build -t kastrov/bms:latest -f bookmyshow-app/Dockerfile bookmyshow-app
+
+                            echo "Pushing Docker image..."
+                            docker push kastrov/bms:latest
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Container') {
+            steps {
+                sh '''
+                    echo "Stopping and removing old container..."
+                    docker stop bms || true
+                    docker rm bms || true
+
+                    echo "Running new container on port 3000..."
+                    docker run -d --restart=always --name bms -p 3000:3000 kastrov/bms:latest
+
+                    echo "Checking running containers..."
+                    docker ps -a
+
+                    echo "Fetching logs..."
+                    sleep 5
+                    docker logs bms
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            emailext attachLog: true,
+                subject: "'${currentBuild.result}' - BMS Pipeline",
+                body: """
+                    <b>Project:</b> ${env.JOB_NAME}<br/>
+                    <b>Build Number:</b> ${env.BUILD_NUMBER}<br/>
+                    <b>URL:</b> ${env.BUILD_URL}<br/>
+                """,
+                to: 'sejalkarwa2@gmail.com'
+        }
+    }
+}
