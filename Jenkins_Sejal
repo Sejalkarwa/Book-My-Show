@@ -1,0 +1,118 @@
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'node23'   // Jenkins NodeJS tool name
+    }
+
+    environment {
+        IMAGE_NAME = 'sejalrk/bookmyshow-app'
+        DOCKER_CRED = 'docker-creds'          // Jenkins credential ID for DockerHub
+        SONARQUBE_SERVER = 'sonar-server'      // Jenkins SonarQube server name
+        SONAR_TOKEN = credentials('sejal-bms-token')
+        NOTIFY_EMAIL = 'sejalkarwa2@gmail.com'
+    }
+
+    stages {
+        stage('Declarative Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                git branch: 'feature_devops_setup', url: 'https://github.com/Sejalkarwa/Book-My-Show.git'
+                sh 'ls -la'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    sh '''
+                        $SONAR_SCANNER_HOME/bin/sonar-scanner \
+                          -Dsonar.projectKey=bookmyshow-app \
+                          -Dsonar.projectName=BookMyShow \
+                          -Dsonar.sources=. \
+                          -Dsonar.host.url=$SONAR_HOST_URL \
+                          -Dsonar.login=$SONAR_TOKEN || true
+                    '''
+                }
+            }
+        }
+
+        stage('Install NPM Dependencies') {
+            steps {
+                sh '''
+                cd bookmyshow-app
+                if [ -f package.json ]; then
+                    rm -rf node_modules package-lock.json
+                    npm install
+                else
+                    echo "❌ package.json not found!"
+                    exit 1
+                fi
+                '''
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                script {
+                    docker.build("${IMAGE_NAME}:${BUILD_NUMBER}", "bookmyshow-app")
+                    withDockerRegistry([ credentialsId: "${DOCKER_CRED}", url: "" ]) {
+                        sh '''
+                            docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                            docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest
+                            docker push ${IMAGE_NAME}:latest
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Docker Container') {
+            steps {
+                sh '''
+                echo "Stopping old container if running..."
+                docker stop bms || true
+                docker rm bms || true
+
+                echo "Starting new container..."
+                docker run -d --restart=always --name bms -p 3000:3000 ${IMAGE_NAME}:latest
+
+                echo "Container logs:"
+                sleep 5
+                docker logs bms
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            emailext(
+                to: "${NOTIFY_EMAIL}",
+                subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "Pipeline executed successfully.\nImage: ${IMAGE_NAME}:${BUILD_NUMBER}\nURL: ${env.BUILD_URL}"
+            )
+        }
+        failure {
+            emailext(
+                to: "${NOTIFY_EMAIL}",
+                subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: "Pipeline failed.\nCheck logs at: ${env.BUILD_URL}"
+            )
+        }
+        always {
+            echo "Pipeline finished with status: ${currentBuild.result}"
+        }
+    }
+}
