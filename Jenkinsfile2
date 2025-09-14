@@ -21,6 +21,15 @@ pipeline {
                 cleanWs()
             }
         }
+     stage('Check Workspace') {
+    steps {
+        sh '''
+        echo "Workspace is: $WORKSPACE"
+        ls -la $WORKSPACE
+        '''
+    }
+}
+
 
         stage('Checkout from Git') {
             steps {
@@ -69,7 +78,7 @@ pipeline {
 
         stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt'
+                sh 'trivy fs $WORKSPACE > $WORKSPACE/trivyfs.txt'
             }
         }
 
@@ -114,16 +123,18 @@ pipeline {
             }
         }
     }
-
     post {
-        always {
-            emailext attachLog: true,
-                subject: "'${currentBuild.result}'",
-                body: "Project: ${env.JOB_NAME}<br/>" +
-                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
-                      "URL: ${env.BUILD_URL}<br/>",
-                to: 'sejalkarwa2@gmail.com',
-                attachmentsPattern: 'trivyfs.txt'
-        }
+    always {
+        emailext(
+            attachLog: true,
+            subject: "Build ${currentBuild.result}: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+            body: """<p>Project: ${env.JOB_NAME}</p>
+                     <p>Build Number: ${env.BUILD_NUMBER}</p>
+                     <p>Build URL: <a href='${env.BUILD_URL}'>${env.BUILD_URL}</a></p>""",
+            to: 'sejalkarwa2@gmail.com',
+            attachmentsPattern: 'trivyfs.txt'
+        )
     }
 }
+
+   
