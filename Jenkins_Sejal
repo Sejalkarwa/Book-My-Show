@@ -1,118 +1,106 @@
+(without K8S Stage)
 pipeline {
     agent any
-
     tools {
-        nodejs 'node23'   // Jenkins NodeJS tool name
+        jdk 'jdk17'
+        nodejs 'node23'
     }
-
     environment {
-        IMAGE_NAME = 'sejalrk/bookmyshow-app'
-        DOCKER_CRED = 'docker-creds'          // Jenkins credential ID for DockerHub
-        SONARQUBE_SERVER = 'sonar-server'      // Jenkins SonarQube server name
-        SONAR_TOKEN = credentials('sejal-bms-token')
-        NOTIFY_EMAIL = 'sejalkarwa2@gmail.com'
+        SCANNER_HOME = tool 'sonar-scanner'
     }
-
     stages {
-        stage('Declarative Checkout SCM') {
-            steps {
-                checkout scm
-            }
-        }
-
         stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
-
-        stage('Checkout Code') {
+        stage('Checkout from Git') {
             steps {
                 git branch: 'feature_devops_setup', url: 'https://github.com/Sejalkarwa/Book-My-Show.git'
-                sh 'ls -la'
+                sh 'ls -la'  // Verify files after checkout
             }
         }
-
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv("${SONARQUBE_SERVER}") {
-                    sh '''
-                        $SONAR_SCANNER_HOME/bin/sonar-scanner \
-                          -Dsonar.projectKey=bookmyshow-app \
-                          -Dsonar.projectName=BookMyShow \
-                          -Dsonar.sources=. \
-                          -Dsonar.host.url=$SONAR_HOST_URL \
-                          -Dsonar.login=$SONAR_TOKEN || true
+                withSonarQubeEnv('sonar-server') {
+                    sh ''' 
+                    $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=BMS \
+                    -Dsonar.projectKey=BMS 
                     '''
                 }
             }
         }
-
-        stage('Install NPM Dependencies') {
+        stage('Quality Gate') {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                }
+            }
+        }
+        stage('Install Dependencies') {
             steps {
                 sh '''
                 cd bookmyshow-app
+                ls -la  # Verify package.json exists
                 if [ -f package.json ]; then
-                    rm -rf node_modules package-lock.json
-                    npm install
+                    rm -rf node_modules package-lock.json  # Remove old dependencies
+                    npm install  # Install fresh dependencies
                 else
-                    echo "❌ package.json not found!"
+                    echo "Error: package.json not found in bookmyshow-app!"
                     exit 1
                 fi
                 '''
             }
         }
-
+        stage('Trivy FS Scan') {
+            steps {
+                sh 'trivy fs . > trivyfs.txt'
+            }
+        }
         stage('Docker Build & Push') {
             steps {
                 script {
-                    docker.build("${IMAGE_NAME}:${BUILD_NUMBER}", "bookmyshow-app")
-                    withDockerRegistry([ credentialsId: "${DOCKER_CRED}", url: "" ]) {
-                        sh '''
-                            docker push ${IMAGE_NAME}:${BUILD_NUMBER}
-                            docker tag ${IMAGE_NAME}:${BUILD_NUMBER} ${IMAGE_NAME}:latest
-                            docker push ${IMAGE_NAME}:latest
+                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                        sh ''' 
+                        echo "Building Docker image..."
+                        docker build --no-cache -t sejalrk/bms:latest -f bookmyshow-app/Dockerfile bookmyshow-app
+
+                        echo "Pushing Docker image to registry..."
+                        docker push sejalrk/bms:latest
                         '''
                     }
                 }
             }
         }
-
-        stage('Deploy to Docker Container') {
+        stage('Deploy to Container') {
             steps {
-                sh '''
-                echo "Stopping old container if running..."
+                sh ''' 
+                echo "Stopping and removing old container..."
                 docker stop bms || true
                 docker rm bms || true
 
-                echo "Starting new container..."
-                docker run -d --restart=always --name bms -p 3000:3000 ${IMAGE_NAME}:latest
+                echo "Running new container on port 3000..."
+                docker run -d --restart=always --name bms -p 3000:3000 sejalrk/bms:latest
 
-                echo "Container logs:"
-                sleep 5
+                echo "Checking running containers..."
+                docker ps -a
+
+                echo "Fetching logs..."
+                sleep 5  # Give time for the app to start
                 docker logs bms
                 '''
             }
         }
     }
-
     post {
-        success {
-            emailext(
-                to: "${NOTIFY_EMAIL}",
-                subject: "✅ SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                body: "Pipeline executed successfully.\nImage: ${IMAGE_NAME}:${BUILD_NUMBER}\nURL: ${env.BUILD_URL}"
-            )
-        }
-        failure {
-            emailext(
-                to: "${NOTIFY_EMAIL}",
-                subject: "❌ FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
-                body: "Pipeline failed.\nCheck logs at: ${env.BUILD_URL}"
-            )
-        }
         always {
-            echo "Pipeline finished with status: ${currentBuild.result}"
+            emailext attachLog: true,
+                subject: "'${currentBuild.result}'",
+                body: "Project: ${env.JOB_NAME}<br/>" +
+                      "Build Number: ${env.BUILD_NUMBER}<br/>" +
+                      "URL: ${env.BUILD_URL}<br/>",
+                to: 'sejalkarwa2@gmail.com',
+                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
         }
     }
 }
